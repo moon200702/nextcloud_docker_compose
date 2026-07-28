@@ -1,0 +1,111 @@
+services:
+  # 資料庫：存放 Nextcloud 的主要資料
+  db:
+    image: postgres:16-alpine
+    container_name: nextcloud-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nextcloud}
+      POSTGRES_USER: ${POSTGRES_USER:-nextcloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - nextcloud-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nextcloud-net
+
+  # Redis：提供快取與鎖定，提升效能
+  redis:
+    image: redis:7-alpine
+    container_name: nextcloud-redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-change-me}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nextcloud-net
+
+  # Nextcloud 主服務：提供網頁介面與檔案管理
+  nextcloud:
+    image: nextcloud:stable
+    container_name: nextcloud-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    environment:
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-change-me}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${NEXTCLOUD_HOST:-localhost}
+      POSTGRES_HOST: db
+      POSTGRES_DB: ${POSTGRES_DB:-nextcloud}
+      POSTGRES_USER: ${POSTGRES_USER:-nextcloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      REDIS_HOST: redis
+      REDIS_HOST_PASSWORD: ${REDIS_PASSWORD:-change-me}
+      PHP_MEMORY_LIMIT: 512M
+    volumes:
+      - nextcloud-app:/var/www/html
+      - nextcloud-data:/var/www/html/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/status.php >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nextcloud-net
+
+  # Cron：每 5 分鐘執行一次背景任務
+  cron:
+    image: nextcloud:stable
+    container_name: nextcloud-cron
+    restart: unless-stopped
+    depends_on:
+      nextcloud:
+        condition: service_healthy
+    volumes:
+      - nextcloud-app:/var/www/html
+      - nextcloud-data:/var/www/html/data
+    entrypoint: ["/bin/sh", "-c", "echo '*/5 * * * * php -f /var/www/html/cron.php' > /var/spool/cron/crontabs/www-data && exec crond -f -l 8"]
+    networks:
+      - nextcloud-net
+
+  # Collabora：提供線上文件協作編輯
+  collabora:
+    image: collabora/code:latest
+    container_name: nextcloud-collabora
+    restart: unless-stopped
+    ports:
+      - "9980:9980"
+    environment:
+      domain: ${COLLABORA_DOMAIN:-.*}
+      aliasgroup1: ${COLLABORA_ALIASGROUP1:-https://.*:443}
+      username: ${COLLABORA_USERNAME:-admin}
+      password: ${COLLABORA_PASSWORD:-change-me}
+      extra_params: --o:ssl.enable=false --o:ssl.termination=true
+    cap_add:
+      - MKNOD
+    networks:
+      - nextcloud-net
+
+volumes:
+  # 持久化資料卷：避免容器重啟後資料遺失
+  nextcloud-db:
+  nextcloud-app:
+  nextcloud-data:
+
+networks:
+  # Docker 網路：讓各服務彼此可互相連線
+  nextcloud-net:
+    driver: bridge
